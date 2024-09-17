@@ -33,17 +33,18 @@ type Server struct {
 	sharedKey         []byte
 	listener          net.Listener
 	shutdownChan      chan struct{}
+	wg                sync.WaitGroup
 }
 
 func main() {
-	debug := true
+	var debug = true
 	if debug {
 		log.SetOutput(os.Stdout)
 	} else {
 		log.SetOutput(io.Discard)
 	}
 
-	server := NewServer(30 * time.Second)
+	server := NewServer(200 * time.Second)
 
 	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -60,14 +61,13 @@ func main() {
 		log.Fatal("Failed to create onion service:", err)
 	}
 	server.listener = onion
-	
+
 	log.Printf("Server started. Connect with: %v.onion:9999\n", onion.ID)
 
 	go server.acceptConnections()
 
 	// Wait for shutdown signal
 	<-sigChan
-	log.Println("Shutdown signal received. Initiating graceful shutdown...")
 	server.shutdown()
 }
 
@@ -86,26 +86,18 @@ func NewServer(heartbeatInterval time.Duration) *Server {
 
 func (s *Server) acceptConnections() {
 	for {
-		select {
-		case <-s.shutdownChan:
-			return
-		default:
-			conn, err := s.listener.Accept()
-			if err != nil {
-				select {
-				case <-s.shutdownChan:
-					return
-				default:
-					log.Println("Failed to accept connection:", err)
-				}
-				continue
-			}
-			go s.handleConnection(conn)
+		conn, err := s.listener.Accept()
+		if err != nil {
+			log.Println("Listener closed or error occurred. Stopping to accept new connections:", err)
+			return // Exit the loop on accept error
 		}
+		go s.handleConnection(conn)
 	}
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
+	s.wg.Add(1)
+	defer s.wg.Done()
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
@@ -130,28 +122,30 @@ func (s *Server) handleConnection(conn net.Conn) {
 	for {
 		select {
 		case <-s.shutdownChan:
+			log.Printf("Server is shutting down. Closing connection to %s\n", publicKeyID)
 			return
 		default:
-			conn.SetDeadline(time.Now().Add(s.heartbeatInterval))
+			// Set a deadline to avoid blocking indefinitely
+			conn.SetReadDeadline(time.Now().Add(s.heartbeatInterval))
 			message, err := s.readMessage(conn)
 			if err != nil {
-				if err != io.EOF {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue // Read timeout, continue to next iteration
+				}
+				if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 					log.Printf("Error reading from %s: %v\n", publicKeyID, err)
 				}
 				return
 			}
 			if message == "" {
-				log.Printf("Empty message received from %s\n", publicKeyID)
 				continue
 			} else if message == "heartbeat" {
-				log.Printf("Received heartbeat from %s\n", publicKeyID)
-				err = s.sendMessage(conn, []byte("heartbeat ack"))
+				err = s.sendAESEncryptedMessage(conn, []byte("heartbeat ack"))
 				if err != nil {
 					log.Printf("Failed to send heartbeat ack to %s: %v\n", publicKeyID, err)
 					return
 				}
 			} else {
-				log.Printf("%s: %s\n", publicKeyID, message)
 				s.broadcastMessage(message, client)
 			}
 		}
@@ -183,7 +177,7 @@ func (s *Server) readMessage(conn net.Conn) (string, error) {
 	return string(decryptedMessage), nil
 }
 
-func (s *Server) sendMessage(conn net.Conn, message []byte) error {
+func (s *Server) sendAESEncryptedMessage(conn net.Conn, message []byte) error {
 	encryptedMessage, err := gochatcrypto.EncryptWithAES(s.sharedKey, message)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt message: %v", err)
@@ -203,7 +197,7 @@ func (s *Server) broadcastMessage(message string, sender *Client) {
 	defer s.mu.RUnlock()
 	for _, client := range s.clients {
 		if client != sender {
-			err := s.sendMessage(client.conn, []byte(message))
+			err := s.sendAESEncryptedMessage(client.conn, []byte(message))
 			if err != nil {
 				log.Printf("Error sending message to %s: %v\n", client.publicKeyID, err)
 			}
@@ -212,22 +206,43 @@ func (s *Server) broadcastMessage(message string, sender *Client) {
 }
 
 func (s *Server) shutdown() {
-	close(s.shutdownChan)
+	log.Println("Shutdown signal received. Initiating graceful shutdown...")
+
+	// Close the listener to stop accepting new connections
 	s.listener.Close()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Close the shutdown channel to signal other goroutines
+	close(s.shutdownChan)
 
-	shutdownMessage := "Server is shutting down. Goodbye!"
+	// Lock the clients map while accessing it
+	s.mu.Lock()
+
+	// Send shutdown message to all clients
 	for _, client := range s.clients {
-		err := s.sendMessage(client.conn, []byte(shutdownMessage))
+		err := s.sendAESEncryptedMessage(client.conn, []byte("Server is shutting down. Goodbye!"))
 		if err != nil {
 			log.Printf("Error sending shutdown message to %s: %v\n", client.publicKeyID, err)
 		}
+	}
+	s.mu.Unlock()
+
+	// Wait briefly to allow clients to receive the message
+	time.Sleep(2 * time.Second)
+
+	// Now force close any remaining connections
+	s.forceCloseRemainingConnections()
+
+	log.Println("Server has shut down.")
+}
+
+func (s *Server) forceCloseRemainingConnections() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, client := range s.clients {
 		client.conn.Close()
 	}
-
-	log.Println("All clients notified. Server shutting down.")
+	s.clients = make(map[string]*Client)
 }
 
 func (s *Server) addClient(client *Client) {
@@ -240,8 +255,10 @@ func (s *Server) addClient(client *Client) {
 func (s *Server) removeClient(client *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.clients, client.publicKeyID)
-	log.Printf("Client disconnected: %s\n", client.publicKeyID)
+	if _, exists := s.clients[client.publicKeyID]; exists {
+		delete(s.clients, client.publicKeyID)
+		log.Printf("Client disconnected: %s\n", client.publicKeyID)
+	}
 }
 
 func (s *Server) readPublicKey(reader *bufio.Reader) (*rsa.PublicKey, error) {
@@ -259,7 +276,7 @@ func (s *Server) readPublicKey(reader *bufio.Reader) (*rsa.PublicKey, error) {
 	return gochatcrypto.ParseRSAPublicKey(publicKeyPEM)
 }
 
-func (s *Server) sendEncryptedSharedKey (conn net.Conn, publicKey *rsa.PublicKey) error {
+func (s *Server) sendEncryptedSharedKey(conn net.Conn, publicKey *rsa.PublicKey) error {
 	encryptedSharedKey, err := gochatcrypto.EncryptWithRSA(publicKey, s.sharedKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt shared key: %v", err)
