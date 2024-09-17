@@ -18,6 +18,7 @@ import (
 
 	"github.com/pablodrake/gochat/gochatcrypto"
 	"golang.org/x/net/proxy"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -47,11 +48,34 @@ func NewTerminal(prompt string) *Terminal {
 		prompt:        prompt,
 	}
 
-	// Save the old terminal state and put the terminal into raw mode
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	fd := int(os.Stdin.Fd())
+
+	// Save the old terminal state
+	oldState, err := term.GetState(fd)
+	if err != nil {
+		log.Fatalf("Failed to get terminal state: %v", err)
+	}
+
+	// Put the terminal into raw mode
+	_, err = term.MakeRaw(fd)
 	if err != nil {
 		log.Fatalf("Failed to set terminal to raw mode: %v", err)
 	}
+
+	// Retrieve the current terminal attributes
+	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		log.Fatalf("Failed to get terminal attributes: %v", err)
+	}
+
+	// Re-enable ISIG to allow signal generation from characters like Ctrl+C
+	termios.Lflag |= unix.ISIG
+
+	// Apply the modified terminal attributes
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
+		log.Fatalf("Failed to set terminal attributes: %v", err)
+	}
+
 	t.oldState = oldState
 
 	go t.inputManager()
@@ -586,8 +610,8 @@ func (c *Client) cleanupConnection() {
 // handleInterrupt listens for OS interrupt signals and triggers immediate shutdown.
 func (c *Client) handleInterrupt(sigChan <-chan os.Signal) {
 	<-sigChan
-	fmt.Println("\nReceived interrupt signal. Exiting...")
 	c.Close()
+	fmt.Println("\nReceived interrupt signal. Exiting...")
 	os.Exit(0)
 }
 
