@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-    "encoding/hex"
+  "encoding/hex"
 )
 
 // GenerateRSAKeys generates and saves an RSA private and public key pair to files.
