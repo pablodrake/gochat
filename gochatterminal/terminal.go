@@ -18,6 +18,7 @@ var stdoutMutex sync.Mutex
 type Terminal struct {
 	inputRequests chan InputRequest
 	history       []string
+  historyIndex  int
 	prompt        string
 	currentLine   string
 	mu            sync.Mutex // Protects currentLine
@@ -35,6 +36,7 @@ func NewTerminal(prompt string) *Terminal {
 	t := &Terminal{
 		inputRequests: make(chan InputRequest),
 		prompt:        prompt,
+    historyIndex:  0,
 	}
 
 	fd := int(os.Stdin.Fd())
@@ -81,6 +83,9 @@ func (t *Terminal) inputManager() {
 		t.mu.Lock()
 		t.currentLine = "" // Initialize currentLine
 		t.mu.Unlock()
+
+		// Initialize history index to point beyond the last element
+		historyIndex := len(t.history)
 
 		for {
 			// Read a single byte
@@ -129,7 +134,69 @@ func (t *Terminal) inputManager() {
 			} else if r == 4 {
 				// Handle Ctrl+D (EOF)
 				req.Response <- ""
-				return
+				break
+			} else if r == 0x1b { // ESC character
+				// Read the next two bytes to identify the escape sequence
+				var seq [2]byte
+				n, err := os.Stdin.Read(seq[:])
+				if err != nil || n < 2 {
+					log.Printf("Error reading escape sequence: %v", err)
+					continue // Skip processing this escape sequence
+				}
+
+				if seq[0] == '[' {
+					switch seq[1] {
+					case 'A': // Up Arrow
+						if historyIndex > 0 {
+							historyIndex--
+							// Retrieve the previous command from history
+							historyLine := t.history[historyIndex]
+							// Clear the current input line
+							t.clearCurrentInput()
+							// Update the current line with the history entry
+							line = []rune(historyLine)
+							t.mu.Lock()
+							t.currentLine = historyLine
+							t.mu.Unlock()
+							// Reprint the prompt and the history line
+							stdoutMutex.Lock()
+							fmt.Print("\r" + req.Prompt + historyLine)
+							stdoutMutex.Unlock()
+						}
+					case 'B': // Down Arrow
+						if historyIndex < len(t.history)-1 {
+							historyIndex++
+							// Retrieve the next command from history
+							historyLine := t.history[historyIndex]
+							// Clear the current input line
+							t.clearCurrentInput()
+							// Update the current line with the history entry
+							line = []rune(historyLine)
+							t.mu.Lock()
+							t.currentLine = historyLine
+							t.mu.Unlock()
+							// Reprint the prompt and the history line
+							stdoutMutex.Lock()
+							fmt.Print("\r" + req.Prompt + historyLine)
+							stdoutMutex.Unlock()
+						} else if historyIndex == len(t.history)-1 {
+							historyIndex++
+							// Clear the current input line
+							t.clearCurrentInput()
+							// Reset the current line
+							line = nil
+							t.mu.Lock()
+							t.currentLine = ""
+							t.mu.Unlock()
+							// Reprint the prompt without any history line
+							stdoutMutex.Lock()
+							fmt.Print("\r" + req.Prompt)
+							stdoutMutex.Unlock()
+						}
+					default:
+						// Handle other escape sequences if necessary
+					}
+				}
 			} else {
 				// Add the rune to the line
 				line = append(line, r)
@@ -141,6 +208,9 @@ func (t *Terminal) inputManager() {
 				stdoutMutex.Lock()
 				fmt.Print(string(r))
 				stdoutMutex.Unlock()
+
+				// Reset history index since user is typing a new command
+				historyIndex = len(t.history)
 			}
 		}
 	}

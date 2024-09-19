@@ -340,6 +340,7 @@ func (c *Client) sendMessage(line string) {
 	}
 
 	if line == "exit" {
+    //TODO:Fix exit
 		fmt.Println("Disconnecting from chat server...")
 		c.signalDone()
 		return
