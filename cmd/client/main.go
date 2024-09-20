@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -17,7 +18,7 @@ import (
 	"time"
 
 	"github.com/pablodrake/gochat/gochatcrypto"
-  "github.com/pablodrake/gochat/gochatterminal"
+	"github.com/pablodrake/gochat/gochatterminal"
 	"golang.org/x/net/proxy"
 )
 
@@ -55,7 +56,7 @@ func (c *Client) Run() error {
 	for {
 		// Establish connection
 		if err := c.establishConnection(); err != nil {
-			fmt.Printf("Failed to establish connection: %v\n", err)
+			c.terminal.PrintMessage(fmt.Sprintf("Failed to establish connection: %v", err))
 			retry := askYesNo("Do you want to try again? [yes/no]: ", c.terminal)
 			if !retry {
 				return nil // Normal termination
@@ -63,7 +64,7 @@ func (c *Client) Run() error {
 			continue
 		}
 
-		fmt.Println("Successfully connected to the chat server!")
+		c.terminal.PrintMessage("Successfully connected to the chat server!")
 
 		// Create a new context for this connection session
 		ctx, cancel := context.WithCancel(context.Background())
@@ -127,12 +128,6 @@ func (c *Client) handleInput(ctx context.Context) {
 				continue
 			}
 
-			if line == "exit" {
-				fmt.Println("Disconnecting from chat server...")
-				c.signalDone()
-				return
-			}
-
 			c.sendMessage(line)
 		}
 	}
@@ -149,7 +144,7 @@ func (c *Client) readMessages(ctx context.Context) {
 			encryptedMessage, err := reader.ReadString('\n')
 			if err != nil {
 				if err == io.EOF {
-					fmt.Println("\nServer has disconnected. (Press enter to continue)")
+					c.terminal.PrintMessage("Server has disconnected.")
 				} else {
 					log.Printf("Error reading from server: %v", err)
 				}
@@ -160,9 +155,9 @@ func (c *Client) readMessages(ctx context.Context) {
 			message, err := c.processIncomingMessage(encryptedMessage)
 			if err != nil {
 				log.Printf("Error processing message: %v", err)
-			} else {
-        c.terminal.PrintMessage(message)
-			}
+			} else if message != ""{
+				c.terminal.PrintMessage(message)
+      } 
 		}
 	}
 }
@@ -208,18 +203,31 @@ func (c *Client) Close() {
 
 // handleKeySetup manages the key generation or loading process.
 func (c *Client) handleKeySetup() error {
-	choice, err := c.terminal.ReadLineWithPrompt("Do you want to generate a new key pair or use existing? [generate/use]: ")
-	if err != nil {
-		return fmt.Errorf("failed to read choice: %w", err)
-	}
+	for {
+		choice, err := c.terminal.ReadLineWithPrompt("Do you want to generate a new key pair or use existing? [generate/use]: ")
+		if err != nil {
+			return fmt.Errorf("failed to read choice: %w", err)
+		}
 
-	switch choice {
-	case "generate":
-		return c.generateKeys()
-	case "use":
-		return c.loadKeys()
-	default:
-		return fmt.Errorf("invalid choice: %s", choice)
+		choice = strings.TrimSpace(strings.ToLower(choice))
+
+		switch choice {
+		case "generate":
+			if err := c.generateKeys(); err != nil {
+				c.terminal.PrintMessage("Error generating keys: " + err.Error())
+				continue // Re-prompt the user
+			}
+			return nil // Successful key generation
+		case "use":
+			if err := c.loadKeys(); err != nil {
+				c.terminal.PrintMessage("Error loading keys: " + err.Error())
+				continue // Re-prompt the user
+			}
+			return nil // Successful key loading
+		default:
+			c.terminal.PrintMessage("Invalid choice. Please enter 'generate' or 'use'.")
+			// Loop continues to re-prompt the user
+		}
 	}
 }
 
@@ -229,7 +237,7 @@ func (c *Client) generateKeys() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate keys: %w", err)
 	}
-	fmt.Println("Keys generated and saved to 'private.pem' and 'public.pem'")
+	c.terminal.PrintMessage("Keys generated and saved to 'private.pem' and 'public.pem'")
 	return c.loadKeysFromFiles("private.pem", "public.pem")
 }
 
@@ -339,13 +347,6 @@ func (c *Client) sendMessage(line string) {
 		return
 	}
 
-	if line == "exit" {
-    //TODO:Fix exit
-		fmt.Println("Disconnecting from chat server...")
-		c.signalDone()
-		return
-	}
-
 	message := fmt.Sprintf("%s: %s", c.publicKeyID, line)
 
 	encodedMessage, err := c.processOutgoingMessage(message)
@@ -406,17 +407,23 @@ func (c *Client) processIncomingMessage(encryptedMessage string) (string, error)
 	}
 
 	message := string(decryptedText)
-	c.handleServerMessage(message)
+	message = c.handleServerMessage(message)
 	return message, nil
 }
 
 // handleServerMessage processes server messages.
-func (c *Client) handleServerMessage(message string) {
+func (c *Client) handleServerMessage(message string) (handledMessage string) {
 	// Check for shutdown message
+  handledMessage = ""
 	if message == "Server is shutting down. Goodbye!" {
-		fmt.Println("Server has disconnected.")
+		c.terminal.PrintMessage("Server has disconnected.")
 		c.signalDone()
-	}
+	} else if message == "heartbeat ack" {
+    log.Printf("Received heartbeat from server") 
+  } else {
+    handledMessage = message
+  }
+  return handledMessage
 }
 
 // cleanupConnection closes the connection and performs any necessary cleanup.
@@ -443,7 +450,7 @@ func askYesNo(prompt string, terminal *gochatterminal.Terminal) bool {
 	for {
 		response, err := terminal.ReadLineWithPrompt(prompt)
 		if err != nil {
-			fmt.Println("Error reading input. Please try again.")
+			terminal.PrintMessage("Error reading input. Please try again.")
 			continue
 		}
 		response = strings.TrimSpace(strings.ToLower(response))
@@ -453,22 +460,25 @@ func askYesNo(prompt string, terminal *gochatterminal.Terminal) bool {
 		if response == "no" || response == "n" {
 			return false
 		}
-		fmt.Println("Please answer 'yes' or 'no'.")
+		terminal.PrintMessage("Please answer 'yes' or 'no'.")
 	}
 }
 
 func main() {
-	var debug bool = false
+	var debug bool = true
 	if debug {
 		log.SetOutput(os.Stdout)
 	} else {
 		log.SetOutput(io.Discard)
 	}
 
-	// Create Terminal
-	terminal := gochatterminal.NewTerminal("> ")
+  terminal, err := gochatterminal.NewTerminal("> ")
+  if err != nil {
+      log.Fatalf("Error creating terminal: %v", err)
+  }
 
 	client := NewClient(terminal)
+	defer client.Close()
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -477,7 +487,7 @@ func main() {
 
 	// Run the client
 	if err := client.Run(); err != nil {
-		log.Fatalf("Client error: %v", err)
+    log.Fatalf("Client error: %v", err)
 	}
 
 	// No need to call Close() here as Run handles cleanup

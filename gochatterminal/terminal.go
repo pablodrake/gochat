@@ -1,14 +1,13 @@
+// gochatterminal/terminal.go
 package gochatterminal
 
-import(
-  "sync"
-  "os"
-  "log"
-  "fmt"
+import (
+	"fmt"
+	"os"
+	"sync"
 
-  "golang.org/x/sys/unix"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
-
 )
 
 // Global mutex to synchronize terminal output
@@ -18,7 +17,7 @@ var stdoutMutex sync.Mutex
 type Terminal struct {
 	inputRequests chan InputRequest
 	history       []string
-  historyIndex  int
+	historyIndex  int
 	prompt        string
 	currentLine   string
 	mu            sync.Mutex // Protects currentLine
@@ -32,11 +31,11 @@ type InputRequest struct {
 }
 
 // NewTerminal initializes a new Terminal instance.
-func NewTerminal(prompt string) *Terminal {
+func NewTerminal(prompt string) (*Terminal, error) {
 	t := &Terminal{
 		inputRequests: make(chan InputRequest),
 		prompt:        prompt,
-    historyIndex:  0,
+		historyIndex:  0,
 	}
 
 	fd := int(os.Stdin.Fd())
@@ -44,19 +43,18 @@ func NewTerminal(prompt string) *Terminal {
 	// Save the old terminal state
 	oldState, err := term.GetState(fd)
 	if err != nil {
-		log.Fatalf("Failed to get terminal state: %v", err)
+    return t, fmt.Errorf("failed to get terminal state: +%w", err)
 	}
 
 	// Put the terminal into raw mode
-	_, err = term.MakeRaw(fd)
-	if err != nil {
-		log.Fatalf("Failed to set terminal to raw mode: %v", err)
+	if _, err := term.MakeRaw(fd); err != nil {
+    return t, fmt.Errorf("failed to put terminal into raw mode: %w", err)
 	}
 
 	// Retrieve the current terminal attributes
 	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
-		log.Fatalf("Failed to get terminal attributes: %v", err)
+    return t, fmt.Errorf("failed to retrieve the current terminal attributes: %w", err)
 	}
 
 	// Re-enable ISIG to allow signal generation from characters like Ctrl+C
@@ -64,13 +62,13 @@ func NewTerminal(prompt string) *Terminal {
 
 	// Apply the modified terminal attributes
 	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
-		log.Fatalf("Failed to set terminal attributes: %v", err)
+    return t, fmt.Errorf("failed to apply the modified terminal attributes: %w", err)
 	}
 
 	t.oldState = oldState
 
 	go t.inputManager()
-	return t
+	return t, nil
 }
 
 func (t *Terminal) inputManager() {
@@ -92,7 +90,7 @@ func (t *Terminal) inputManager() {
 			var buf [1]byte
 			n, err := os.Stdin.Read(buf[:])
 			if err != nil || n == 0 {
-				log.Printf("Error reading input: %v", err)
+				t.PrintMessage("Error reading input.")
 				req.Response <- ""
 				break
 			}
@@ -129,7 +127,7 @@ func (t *Terminal) inputManager() {
 				stdoutMutex.Lock()
 				fmt.Print("^C\r\n")
 				stdoutMutex.Unlock()
-				req.Response <- "exit"
+				req.Response <- ""
 				break
 			} else if r == 4 {
 				// Handle Ctrl+D (EOF)
@@ -140,7 +138,7 @@ func (t *Terminal) inputManager() {
 				var seq [2]byte
 				n, err := os.Stdin.Read(seq[:])
 				if err != nil || n < 2 {
-					log.Printf("Error reading escape sequence: %v", err)
+          t.PrintMessage("\n\rError reading escape sequence.")
 					continue // Skip processing this escape sequence
 				}
 
@@ -249,16 +247,16 @@ func (t *Terminal) Close() {
 	term.Restore(int(os.Stdin.Fd()), t.oldState)
 }
 
+// PrintMessage prints a message to the terminal in a thread-safe manner.
 func (t *Terminal) PrintMessage(message string) {
-  t.mu.Lock()
-  line := t.currentLine
-  t.mu.Unlock()
+	t.mu.Lock()
+	line := t.currentLine
+	t.mu.Unlock()
 
-  t.clearCurrentInput()
+	t.clearCurrentInput()
 
-  stdoutMutex.Lock()
-  fmt.Println("\r" + message)
-  fmt.Print("\r" + t.prompt + line)
-  stdoutMutex.Unlock()
+	stdoutMutex.Lock()
+	defer stdoutMutex.Unlock()
+	fmt.Println("\r" + message)
+	fmt.Print("\r" + t.prompt + line)
 }
-
