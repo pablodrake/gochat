@@ -419,7 +419,8 @@ func (c *Client) handleServerMessage(message string) (handledMessage string) {
 		c.terminal.PrintMessage("Server has disconnected.")
 		c.signalDone()
 	} else if message == "heartbeat ack" {
-    log.Printf("Received heartbeat from server") 
+    //TODO: Fix loging, maybe write to file
+    log.Printf("Received heartbeat from server\r\n") 
   } else {
     handledMessage = message
   }
@@ -467,7 +468,14 @@ func askYesNo(prompt string, terminal *gochatterminal.Terminal) bool {
 func main() {
 	var debug bool = true
 	if debug {
-		log.SetOutput(os.Stdout)
+    logFile, err := os.Create("gochatLogs")
+    if err != nil {
+      log.Fatalf("Error creating log file: %v", err)
+      return
+    }
+    defer logFile.Close()
+
+		log.SetOutput(logFile)
 	} else {
 		log.SetOutput(io.Discard)
 	}
