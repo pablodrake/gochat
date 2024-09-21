@@ -36,41 +36,6 @@ type Server struct {
 	wg                sync.WaitGroup
 }
 
-func main() {
-	var debug = true
-	if debug {
-		log.SetOutput(os.Stdout)
-	} else {
-		log.SetOutput(io.Discard)
-	}
-
-	server := NewServer(200 * time.Second)
-
-	// Setup signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	t, err := tor.Start(context.TODO(), nil)
-	if err != nil {
-		log.Fatal("Failed to start Tor:", err)
-	}
-	defer t.Close()
-
-	onion, err := t.Listen(context.Background(), &tor.ListenConf{RemotePorts: []int{9999}, Version3: true})
-	if err != nil {
-		log.Fatal("Failed to create onion service:", err)
-	}
-	server.listener = onion
-
-	log.Printf("Server started. Connect with: %v.onion:9999\n", onion.ID)
-
-	go server.acceptConnections()
-
-	// Wait for shutdown signal
-	<-sigChan
-	server.shutdown()
-}
-
 func NewServer(heartbeatInterval time.Duration) *Server {
 	serverKey, err := gochatcrypto.GenerateAESKey()
 	if err != nil {
@@ -289,4 +254,39 @@ func (s *Server) sendEncryptedSharedKey(conn net.Conn, publicKey *rsa.PublicKey)
 	}
 
 	return nil
+}
+
+func main() {
+	var debug = true
+	if debug {
+		log.SetOutput(os.Stdout)
+	} else {
+		log.SetOutput(io.Discard)
+	}
+
+	server := NewServer(200 * time.Second)
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	t, err := tor.Start(context.TODO(), nil)
+	if err != nil {
+		log.Fatal("Failed to start Tor:", err)
+	}
+	defer t.Close()
+
+	onion, err := t.Listen(context.Background(), &tor.ListenConf{RemotePorts: []int{9999}, Version3: true})
+	if err != nil {
+		log.Fatal("Failed to create onion service:", err)
+	}
+	server.listener = onion
+
+	log.Printf("Server started. Connect with: %v.onion:9999\n", onion.ID)
+
+	go server.acceptConnections()
+
+	// Wait for shutdown signal
+	<-sigChan
+	server.shutdown()
 }

@@ -48,61 +48,65 @@ func NewClient(terminal *gochatterminal.Terminal) *Client {
 
 // Run starts the client's main loop.
 func (c *Client) Run() error {
-	// Handle key setup
-	if err := c.handleKeySetup(); err != nil {
-		return fmt.Errorf("key setup failed: %v", err)
-	}
+    // Handle key setup
+    if err := c.handleKeySetup(); err != nil {
+        return fmt.Errorf("key setup failed: %v", err)
+    }
 
-	for {
-		// Establish connection
-		if err := c.establishConnection(); err != nil {
-			c.terminal.PrintMessage(fmt.Sprintf("Failed to establish connection: %v", err))
-			retry := askYesNo("Do you want to try again? [yes/no]: ", c.terminal)
-			if !retry {
-				return nil // Normal termination
-			}
-			continue
-		}
+    for {
+        // Reset done channel and once variable at the beginning of each iteration
+        c.done = make(chan struct{})
+        c.once = sync.Once{}
 
-		c.terminal.PrintMessage("Successfully connected to the chat server!")
+        // Establish connection
+        if err := c.establishConnection(); err != nil {
+            c.terminal.PrintMessage(fmt.Sprintf("Failed to establish connection: %v", err))
+            retry := askYesNo("Do you want to connect to another server? [yes/no]: ", c.terminal)
+            if !retry {
+                return nil // Normal termination
+            }
+            continue
+        }
 
-		// Create a new context for this connection session
-		ctx, cancel := context.WithCancel(context.Background())
+        c.terminal.PrintMessage("Successfully connected to the chat server!")
 
-		// Start goroutines
-		var wg sync.WaitGroup
-		wg.Add(3)
-		go func() {
-			defer wg.Done()
-			c.handleInput(ctx)
-		}()
-		go func() {
-			defer wg.Done()
-			c.readMessages(ctx)
-		}()
-		go func() {
-			defer wg.Done()
-			c.sendHeartbeat(ctx)
-		}()
+        // Create a new context for this connection session
+        ctx, cancel := context.WithCancel(context.Background())
 
-		// Wait for done signal
-		<-c.done
+        // Start goroutines
+        var wg sync.WaitGroup
+        wg.Add(3)
+        go func() {
+            defer wg.Done()
+            c.handleInput(ctx)
+        }()
+        go func() {
+            defer wg.Done()
+            c.readMessages(ctx)
+        }()
+        go func() {
+            defer wg.Done()
+            c.sendHeartbeat(ctx)
+        }()
 
-		// Cancel the context to signal all goroutines to stop
-		cancel()
+        // Wait for done signal
+        <-c.done
 
-		// Wait for all goroutines to finish
-		wg.Wait()
+        // Cancel the context to signal all goroutines to stop
+        cancel()
 
-		// Cleanup
-		c.cleanupConnection()
+        // Wait for all goroutines to finish
+        wg.Wait()
 
-		// Prompt for reconnection
-		retry := askYesNo("Do you want to connect to a new server? [yes/no]: ", c.terminal)
-		if !retry {
-			return nil // Normal termination
-		}
-	}
+        // Cleanup
+        c.cleanupConnection()
+
+        // Prompt for reconnection
+        retry := askYesNo("Do you want to connect to a new server? [yes/no]: ", c.terminal)
+        if !retry {
+            return nil // Normal termination
+        }
+    }
 }
 
 // handleInput manages user input and sends messages.
@@ -126,7 +130,10 @@ func (c *Client) handleInput(ctx context.Context) {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
-			}
+			} else if line == "/exit" {
+        c.signalDone()
+        return
+      }
 
 			c.sendMessage(line)
 		}
@@ -135,56 +142,70 @@ func (c *Client) handleInput(ctx context.Context) {
 
 // readMessages listens for messages from the server, decrypts, and displays them.
 func (c *Client) readMessages(ctx context.Context) {
-	reader := bufio.NewReader(c.conn)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			encryptedMessage, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					c.terminal.PrintMessage("Server has disconnected.")
-				} else {
-					log.Printf("Error reading from server: %v", err)
-				}
-				c.signalDone()
-				return
-			}
+    reader := bufio.NewReader(c.conn)
 
-			message, err := c.processIncomingMessage(encryptedMessage)
-			if err != nil {
-				log.Printf("Error processing message: %v", err)
-			} else if message != ""{
-				c.terminal.PrintMessage(message)
-      } 
-		}
-	}
+    // Start a goroutine to close the connection when context is done
+    go func() {
+        <-ctx.Done()
+        c.connMutex.Lock()
+        if c.conn != nil {
+            c.conn.Close()
+            c.conn = nil
+        }
+        c.connMutex.Unlock()
+    }()
+
+    for {
+        encryptedMessage, err := reader.ReadString('\n')
+        if err != nil {
+            if err == io.EOF || strings.Contains(err.Error(), "use of closed network connection") {
+                // Connection closed, exit the goroutine
+                c.signalDone()
+                return
+            } else {
+                log.Printf("Error reading from server: %v", err)
+                c.signalDone()
+                return
+            }
+        }
+
+        message, err := c.processIncomingMessage(encryptedMessage)
+        if err != nil {
+            log.Printf("Error processing message: %v", err)
+        } else if message != "" {
+            c.terminal.PrintMessage(message)
+        }
+    }
 }
 
 // sendHeartbeat periodically sends heartbeat messages to the server.
 func (c *Client) sendHeartbeat(ctx context.Context) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
+    ticker := time.NewTicker(20 * time.Second)
+    defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.connMutex.Lock()
-			if c.conn != nil {
-				_, err := fmt.Fprintf(c.conn, "heartbeat\n")
-				if err != nil {
-					log.Printf("Error sending heartbeat: %v", err)
-					c.connMutex.Unlock()
-					c.signalDone()
-					return
-				}
-			}
-			c.connMutex.Unlock()
-		}
-	}
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            c.connMutex.Lock()
+            if c.conn != nil {
+                _, err := fmt.Fprintf(c.conn, "heartbeat\n")
+                if err != nil {
+                    if strings.Contains(err.Error(), "use of closed network connection") {
+                        // Connection has been closed, exit the goroutine
+                        c.connMutex.Unlock()
+                        return
+                    }
+                    log.Printf("Error sending heartbeat: %v", err)
+                    c.connMutex.Unlock()
+                    c.signalDone()
+                    return
+                }
+            }
+            c.connMutex.Unlock()
+        }
+    }
 }
 
 // signalDone safely closes the done channel once.
@@ -466,7 +487,7 @@ func askYesNo(prompt string, terminal *gochatterminal.Terminal) bool {
 }
 
 func main() {
-	var debug bool = true
+	var debug bool = false
 	if debug {
     logFile, err := os.Create("gochatLogs")
     if err != nil {
@@ -486,7 +507,6 @@ func main() {
   }
 
 	client := NewClient(terminal)
-	defer client.Close()
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
