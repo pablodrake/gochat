@@ -43,18 +43,18 @@ func NewTerminal(prompt string) (*Terminal, error) {
 	// Save the old terminal state
 	oldState, err := term.GetState(fd)
 	if err != nil {
-    return t, fmt.Errorf("failed to get terminal state: +%w", err)
+		return t, fmt.Errorf("failed to get terminal state: +%w", err)
 	}
 
 	// Put the terminal into raw mode
 	if _, err := term.MakeRaw(fd); err != nil {
-    return t, fmt.Errorf("failed to put terminal into raw mode: %w", err)
+		return t, fmt.Errorf("failed to put terminal into raw mode: %w", err)
 	}
 
 	// Retrieve the current terminal attributes
 	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
-    return t, fmt.Errorf("failed to retrieve the current terminal attributes: %w", err)
+		return t, fmt.Errorf("failed to retrieve the current terminal attributes: %w", err)
 	}
 
 	// Re-enable ISIG to allow signal generation from characters like Ctrl+C
@@ -62,7 +62,7 @@ func NewTerminal(prompt string) (*Terminal, error) {
 
 	// Apply the modified terminal attributes
 	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
-    return t, fmt.Errorf("failed to apply the modified terminal attributes: %w", err)
+		return t, fmt.Errorf("failed to apply the modified terminal attributes: %w", err)
 	}
 
 	t.oldState = oldState
@@ -138,7 +138,7 @@ func (t *Terminal) inputManager() {
 				var seq [2]byte
 				n, err := os.Stdin.Read(seq[:])
 				if err != nil || n < 2 {
-          t.PrintMessage("\n\rError reading escape sequence.")
+					t.PrintMessage("\n\rError reading escape sequence.")
 					continue // Skip processing this escape sequence
 				}
 
