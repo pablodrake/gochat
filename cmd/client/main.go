@@ -216,9 +216,10 @@ func (c *Client) signalDone() {
 
 // Close signals all goroutines to exit and cleans up resources.
 func (c *Client) Close() {
+	c.terminal.Close()
+  fmt.Println("Exiting app...")
 	c.signalDone()
 	c.cleanupConnection()
-	c.terminal.Close()
 }
 
 // handleKeySetup manages the key generation or loading process.
@@ -461,7 +462,7 @@ func (c *Client) cleanupConnection() {
 func (c *Client) handleInterrupt(sigChan <-chan os.Signal) {
 	<-sigChan
 	c.Close()
-	fmt.Println("\nReceived interrupt signal. Exiting...")
+  fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
 	os.Exit(0)
 }
 
@@ -515,7 +516,6 @@ func main() {
 	if err := client.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	} else {
-		fmt.Print("\r\nExiting app...\r")
 		client.Close()
 	}
 
