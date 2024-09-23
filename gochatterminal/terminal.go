@@ -18,6 +18,7 @@ type Terminal struct {
 	inputRequests chan InputRequest
 	history       []string
 	historyIndex  int
+	cursorPos     int
 	prompt        string
 	currentLine   string
 	mu            sync.Mutex // Protects currentLine
@@ -82,7 +83,8 @@ func (t *Terminal) inputManager() {
 		t.currentLine = "" // Initialize currentLine
 		t.mu.Unlock()
 
-		// Initialize history index to point beyond the last element
+		// Initialize cursor position and history index
+		t.cursorPos = 0
 		historyIndex := len(t.history)
 
 		for {
@@ -111,16 +113,16 @@ func (t *Terminal) inputManager() {
 				break
 			} else if r == 127 || r == '\b' {
 				// Handle backspace
-				if len(line) > 0 {
-					line = line[:len(line)-1]
+				if t.cursorPos > 0 {
+					line = append(line[:t.cursorPos-1], line[t.cursorPos:]...)
+					t.cursorPos--
+
 					t.mu.Lock()
 					t.currentLine = string(line)
 					t.mu.Unlock()
 
-					// Erase character from terminal
-					stdoutMutex.Lock()
-					fmt.Print("\b \b") // Move back, clear, and move back again
-					stdoutMutex.Unlock()
+					// Re-render the line
+					t.renderLine(req.Prompt, line)
 				}
 			} else if r == 3 {
 				// Handle Ctrl+C
@@ -149,46 +151,54 @@ func (t *Terminal) inputManager() {
 							historyIndex--
 							// Retrieve the previous command from history
 							historyLine := t.history[historyIndex]
-							// Clear the current input line
-							t.clearCurrentInput()
 							// Update the current line with the history entry
 							line = []rune(historyLine)
 							t.mu.Lock()
 							t.currentLine = historyLine
 							t.mu.Unlock()
-							// Reprint the prompt and the history line
-							stdoutMutex.Lock()
-							fmt.Print("\r" + req.Prompt + historyLine)
-							stdoutMutex.Unlock()
+							// Set cursor position to the end of the line
+							t.cursorPos = len(line)
+							// Re-render the line
+							t.renderLine(req.Prompt, line)
 						}
 					case 'B': // Down Arrow
 						if historyIndex < len(t.history)-1 {
 							historyIndex++
 							// Retrieve the next command from history
 							historyLine := t.history[historyIndex]
-							// Clear the current input line
-							t.clearCurrentInput()
 							// Update the current line with the history entry
 							line = []rune(historyLine)
 							t.mu.Lock()
 							t.currentLine = historyLine
 							t.mu.Unlock()
-							// Reprint the prompt and the history line
-							stdoutMutex.Lock()
-							fmt.Print("\r" + req.Prompt + historyLine)
-							stdoutMutex.Unlock()
+							// Set cursor position to the end of the line
+							t.cursorPos = len(line)
+							// Re-render the line
+							t.renderLine(req.Prompt, line)
 						} else if historyIndex == len(t.history)-1 {
 							historyIndex++
-							// Clear the current input line
-							t.clearCurrentInput()
 							// Reset the current line
 							line = nil
 							t.mu.Lock()
 							t.currentLine = ""
 							t.mu.Unlock()
-							// Reprint the prompt without any history line
+							// Set cursor position to the beginning
+							t.cursorPos = 0
+							// Re-render the prompt
+							t.renderLine(req.Prompt, line)
+						}
+					case 'C': // Right Arrow
+						if t.cursorPos < len(line) {
+							t.cursorPos++
 							stdoutMutex.Lock()
-							fmt.Print("\r" + req.Prompt)
+							fmt.Print("\x1b[1C") // Move cursor right
+							stdoutMutex.Unlock()
+						}
+					case 'D': // Left Arrow
+						if t.cursorPos > 0 {
+							t.cursorPos--
+							stdoutMutex.Lock()
+							fmt.Print("\x1b[1D") // Move cursor left
 							stdoutMutex.Unlock()
 						}
 					default:
@@ -196,16 +206,16 @@ func (t *Terminal) inputManager() {
 					}
 				}
 			} else {
-				// Add the rune to the line
-				line = append(line, r)
+				// Add the rune to the line at cursorPos
+				line = append(line[:t.cursorPos], append([]rune{r}, line[t.cursorPos:]...)...)
+				t.cursorPos++
+
 				t.mu.Lock()
 				t.currentLine = string(line)
 				t.mu.Unlock()
 
-				// Echo the character
-				stdoutMutex.Lock()
-				fmt.Print(string(r))
-				stdoutMutex.Unlock()
+				// Re-render the line
+				t.renderLine(req.Prompt, line)
 
 				// Reset history index since user is typing a new command
 				historyIndex = len(t.history)
@@ -236,6 +246,25 @@ func (t *Terminal) clearCurrentInput() {
 	fmt.Print("\r\033[K") // Move cursor to start of line and clear the line
 }
 
+// renderLine redraws the current input line and positions the cursor correctly.
+func (t *Terminal) renderLine(prompt string, line []rune) {
+	stdoutMutex.Lock()
+	defer stdoutMutex.Unlock()
+
+	// Move cursor to the beginning and clear the line
+	fmt.Print("\r\033[K")
+
+	// Print the prompt and the line
+	fmt.Print(prompt + string(line))
+
+	// Move cursor to the correct position
+	if t.cursorPos < len(line) {
+		// Move cursor back to the cursorPos
+		backSpaces := len(line) - t.cursorPos
+		fmt.Printf("\x1b[%dD", backSpaces)
+	}
+}
+
 // SetPrompt updates the terminal prompt.
 func (t *Terminal) SetPrompt(prompt string) {
 	t.prompt = prompt
@@ -251,6 +280,7 @@ func (t *Terminal) Close() {
 func (t *Terminal) PrintMessage(message string) {
 	t.mu.Lock()
 	line := t.currentLine
+	cursorPos := t.cursorPos
 	t.mu.Unlock()
 
 	t.clearCurrentInput()
@@ -259,4 +289,10 @@ func (t *Terminal) PrintMessage(message string) {
 	defer stdoutMutex.Unlock()
 	fmt.Println("\r" + message)
 	fmt.Print("\r" + t.prompt + line)
+
+	// Move cursor to the correct position
+	if cursorPos < len([]rune(line)) {
+		backSpaces := len([]rune(line)) - cursorPos
+		fmt.Printf("\x1b[%dD", backSpaces)
+	}
 }

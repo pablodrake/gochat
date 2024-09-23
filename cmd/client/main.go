@@ -111,7 +111,6 @@ func (c *Client) Run() error {
 
 // handleInput manages user input and sends messages.
 func (c *Client) handleInput(ctx context.Context) {
-	c.terminal.SetPrompt("> ")
 	for {
 		select {
 		case <-ctx.Done():
