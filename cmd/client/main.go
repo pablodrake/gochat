@@ -439,6 +439,9 @@ func (c *Client) handleServerMessage(message string) (handledMessage string) {
 	if message == "Server is shutting down. Goodbye!" {
 		c.terminal.PrintMessage("Server has disconnected.")
 		c.signalDone()
+	} else if message == "kicked" {
+		c.terminal.PrintMessageWithoutRestoringPrompt("You have been kicked from the server.(Press Enter to exit)")
+		c.signalDone()
 	} else if message == "heartbeat ack" {
 		log.Printf("Received heartbeat from server\r\n")
 	} else {

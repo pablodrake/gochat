@@ -296,3 +296,22 @@ func (t *Terminal) PrintMessage(message string) {
 		fmt.Printf("\x1b[%dD", backSpaces)
 	}
 }
+
+func (t *Terminal) PrintMessageWithoutRestoringPrompt(message string) {
+	t.mu.Lock()
+	line := t.currentLine
+	cursorPos := t.cursorPos
+	t.mu.Unlock()
+
+	t.clearCurrentInput()
+
+	stdoutMutex.Lock()
+	defer stdoutMutex.Unlock()
+	fmt.Println("\r" + message + "\r")
+
+	// Move cursor to the correct position
+	if cursorPos < len([]rune(line)) {
+		backSpaces := len([]rune(line)) - cursorPos
+		fmt.Printf("\x1b[%dD", backSpaces)
+	}
+}

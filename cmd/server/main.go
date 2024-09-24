@@ -1,6 +1,7 @@
 // main.go
 package main
 
+// TODO: Eliminate the bine dependency and use the tor package from the standard library
 import (
 	"bufio"
 	"context"
@@ -22,10 +23,13 @@ import (
 	"github.com/pablodrake/gochat/gochatterminal"
 )
 
+// Client struct with closed flag and mutex
 type Client struct {
 	conn        net.Conn
 	publicKey   *rsa.PublicKey
 	publicKeyID string
+	closed      bool
+	mu          sync.Mutex
 }
 
 type Server struct {
@@ -222,11 +226,42 @@ func (s *Server) handleInput(ctx context.Context) {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
-			} else if line == "/exit" {
-				s.signalDone()
-				return
+			}
+
+			if strings.HasPrefix(line, "/") {
+				// Command parsing
+				fields := strings.Fields(line)
+				command := fields[0]
+				args := fields[1:]
+
+				switch command {
+				case "/exit":
+					s.signalDone()
+					return
+				case "/kick":
+					if len(args) < 1 {
+						s.terminal.PrintMessage("Usage: /kick <client_id>")
+						continue
+					}
+					clientID := args[0]
+					client, exists := s.clients[clientID]
+					if !exists {
+						s.terminal.PrintMessage("Client not found: " + clientID)
+						continue
+					}
+					s.removeClient(client)
+				case "/broadcast":
+					if len(args) < 1 {
+						s.terminal.PrintMessage("Usage: /broadcast <message>")
+						continue
+					}
+					message := strings.Join(args, " ")
+					s.broadcastMessage("Server: "+message, nil)
+				default:
+					s.terminal.PrintMessage("Unknown command: " + command)
+				}
 			} else {
-				s.broadcastMessage("Server: "+line, nil)
+				continue
 			}
 		}
 	}
@@ -235,7 +270,7 @@ func (s *Server) handleInput(ctx context.Context) {
 // shutdown initiates the server shutdown process.
 func (s *Server) Close() {
 	s.terminal.Close()
-  fmt.Println("Exiting app...")
+	fmt.Println("Exiting app...")
 	s.signalDone()
 	s.cleanupServer()
 
@@ -287,6 +322,7 @@ func (s *Server) readMessage(conn net.Conn) (string, error) {
 	return string(decryptedMessage), nil
 }
 
+// Enhanced sendAESEncryptedMessage method
 func (s *Server) sendAESEncryptedMessage(conn net.Conn, message []byte) error {
 	encryptedMessage, err := gochatcrypto.EncryptWithAES(s.sharedKey, message)
 	if err != nil {
@@ -296,6 +332,10 @@ func (s *Server) sendAESEncryptedMessage(conn net.Conn, message []byte) error {
 	encodedMessage := base64.StdEncoding.EncodeToString(encryptedMessage) + "\n"
 	_, err = conn.Write([]byte(encodedMessage))
 	if err != nil {
+		if strings.Contains(err.Error(), "use of closed network connection") {
+			// Ignore the error if the connection is closed
+			return nil
+		}
 		return fmt.Errorf("failed to send message: %v", err)
 	}
 
@@ -314,6 +354,14 @@ func (s *Server) broadcastMessage(message string, sender *Client) {
 			}
 		}
 	}
+}
+
+func (s *Server) sendServerMessage(message string, client *Client) error {
+	err := s.sendAESEncryptedMessage(client.conn, []byte(message))
+	if err != nil {
+		return fmt.Errorf("error sending message to %s: %v", client.publicKeyID, err)
+	}
+	return nil
 }
 
 // forceCloseRemainingConnections closes all client connections.
@@ -335,10 +383,25 @@ func (s *Server) addClient(client *Client) {
 	s.terminal.PrintMessage("Client connected: " + client.publicKeyID)
 }
 
-// removeClient removes a client from the server.
+// Modified removeClient method
 func (s *Server) removeClient(client *Client) {
+	client.mu.Lock()
+	if client.closed {
+		client.mu.Unlock()
+		return
+	}
+	client.closed = true
+	client.mu.Unlock()
+
+	// Attempt to send "kicked" message
+	_ = s.sendServerMessage("kicked", client)
+
+	// Lock the server's client map
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Close the connection and remove the client
+	client.conn.Close()
 	if _, exists := s.clients[client.publicKeyID]; exists {
 		delete(s.clients, client.publicKeyID)
 		s.terminal.PrintMessage("Client disconnected: " + client.publicKeyID)
@@ -428,5 +491,5 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	} else {
 		server.Close()
-}
+	}
 }
