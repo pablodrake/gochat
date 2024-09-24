@@ -4,6 +4,7 @@ package gochatterminal
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -39,35 +40,6 @@ func NewTerminal(prompt string) (*Terminal, error) {
 		historyIndex:  0,
 	}
 
-	fd := int(os.Stdin.Fd())
-
-	// Save the old terminal state
-	oldState, err := term.GetState(fd)
-	if err != nil {
-		return t, fmt.Errorf("failed to get terminal state: +%w", err)
-	}
-
-	// Put the terminal into raw mode
-	if _, err := term.MakeRaw(fd); err != nil {
-		return t, fmt.Errorf("failed to put terminal into raw mode: %w", err)
-	}
-
-	// Retrieve the current terminal attributes
-	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
-	if err != nil {
-		return t, fmt.Errorf("failed to retrieve the current terminal attributes: %w", err)
-	}
-
-	// Re-enable ISIG to allow signal generation from characters like Ctrl+C
-	termios.Lflag |= unix.ISIG
-
-	// Apply the modified terminal attributes
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
-		return t, fmt.Errorf("failed to apply the modified terminal attributes: %w", err)
-	}
-
-	t.oldState = oldState
-
 	go t.inputManager()
 	return t, nil
 }
@@ -92,7 +64,7 @@ func (t *Terminal) inputManager() {
 			var buf [1]byte
 			n, err := os.Stdin.Read(buf[:])
 			if err != nil || n == 0 {
-				t.PrintMessage("Error reading input.")
+				t.PrintMessage("Error reading input.", true)
 				req.Response <- ""
 				break
 			}
@@ -140,7 +112,7 @@ func (t *Terminal) inputManager() {
 				var seq [2]byte
 				n, err := os.Stdin.Read(seq[:])
 				if err != nil || n < 2 {
-					t.PrintMessage("\n\rError reading escape sequence.")
+					t.PrintMessage("Error reading escape sequence.", true)
 					continue // Skip processing this escape sequence
 				}
 
@@ -272,12 +244,13 @@ func (t *Terminal) SetPrompt(prompt string) {
 
 // Close terminates the input manager goroutine and restores terminal state.
 func (t *Terminal) Close() {
+	t.clearCurrentInput()
+	t.RestoreState()
 	close(t.inputRequests)
-	term.Restore(int(os.Stdin.Fd()), t.oldState)
 }
 
 // PrintMessage prints a message to the terminal in a thread-safe manner.
-func (t *Terminal) PrintMessage(message string) {
+func (t *Terminal) PrintMessage(message string, restorePrompt bool) {
 	t.mu.Lock()
 	line := t.currentLine
 	cursorPos := t.cursorPos
@@ -288,7 +261,11 @@ func (t *Terminal) PrintMessage(message string) {
 	stdoutMutex.Lock()
 	defer stdoutMutex.Unlock()
 	fmt.Println("\r" + message)
-	fmt.Print("\r" + t.prompt + line)
+	if restorePrompt {
+		fmt.Print("\r" + t.prompt + line)
+	} else {
+		fmt.Print("\r")
+	}
 
 	// Move cursor to the correct position
 	if cursorPos < len([]rune(line)) {
@@ -297,21 +274,61 @@ func (t *Terminal) PrintMessage(message string) {
 	}
 }
 
-func (t *Terminal) PrintMessageWithoutRestoringPrompt(message string) {
-	t.mu.Lock()
-	line := t.currentLine
-	cursorPos := t.cursorPos
-	t.mu.Unlock()
-
-	t.clearCurrentInput()
-
-	stdoutMutex.Lock()
-	defer stdoutMutex.Unlock()
-	fmt.Println("\r" + message + "\r")
-
-	// Move cursor to the correct position
-	if cursorPos < len([]rune(line)) {
-		backSpaces := len([]rune(line)) - cursorPos
-		fmt.Printf("\x1b[%dD", backSpaces)
+// askYesNo prompts the user with a question and expects a yes/no response.
+// TODO: Inlude this function in terminal package
+func (t *Terminal) AskYesNo(prompt string) bool {
+	for {
+		response, err := t.ReadLineWithPrompt(prompt)
+		if err != nil {
+			t.PrintMessage("Error reading input. Please try again.", false)
+			continue
+		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response == "yes" || response == "y" {
+			return true
+		}
+		if response == "no" || response == "n" {
+			return false
+		}
+		t.PrintMessage("Please answer 'yes' or 'no'.", false)
 	}
+}
+
+func (t *Terminal) SetRawMode() error {
+	fd := int(os.Stdin.Fd())
+
+	// Save the old terminal state
+	oldState, err := term.GetState(fd)
+	if err != nil {
+		return fmt.Errorf("failed to get terminal state: +%w", err)
+	}
+
+	// Put the terminal into raw mode
+	if _, err := term.MakeRaw(fd); err != nil {
+		return fmt.Errorf("failed to put terminal into raw mode: %w", err)
+	}
+
+	// Retrieve the current terminal attributes
+	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve the current terminal attributes: %w", err)
+	}
+
+	// Re-enable ISIG to allow signal generation from characters like Ctrl+C
+	termios.Lflag |= unix.ISIG
+
+	// Apply the modified terminal attributes
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
+		return fmt.Errorf("failed to apply the modified terminal attributes: %w", err)
+	}
+
+	t.oldState = oldState
+	return nil
+}
+
+func (t *Terminal) RestoreState() error {
+	if t.oldState != nil {
+		term.Restore(int(os.Stdin.Fd()), t.oldState)
+	}
+	return nil
 }

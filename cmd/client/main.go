@@ -60,15 +60,19 @@ func (c *Client) Run() error {
 
 		// Establish connection
 		if err := c.establishConnection(); err != nil {
-			c.terminal.PrintMessage(fmt.Sprintf("Failed to establish connection: %v", err))
-			retry := askYesNo("Do you want to connect to another server? [yes/no]: ", c.terminal)
+			c.terminal.PrintMessage("Failed to establish connection: " + err.Error(), true)
+			retry := c.terminal.AskYesNo("Do you want to connect to another server? [yes/no]: ")
 			if !retry {
 				return nil // Normal termination
 			}
 			continue
 		}
 
-		c.terminal.PrintMessage("Successfully connected to the chat server!")
+    if err := c.terminal.SetRawMode(); err != nil {
+      c.terminal.PrintMessage("Failed to set terminal to raw mode " + err.Error(), false)
+      return err
+    }
+		c.terminal.PrintMessage("Successfully connected to the chat server!", true)
 
 		// Create a new context for this connection session
 		ctx, cancel := context.WithCancel(context.Background())
@@ -102,7 +106,7 @@ func (c *Client) Run() error {
 		c.cleanupConnection()
 
 		// Prompt for reconnection
-		retry := askYesNo("Do you want to connect to a new server? [yes/no]: ", c.terminal)
+		retry := c.terminal.AskYesNo("Do you want to connect to a new server? [yes/no]: ")
 		if !retry {
 			return nil // Normal termination
 		}
@@ -172,7 +176,7 @@ func (c *Client) readMessages(ctx context.Context) {
 		if err != nil {
 			log.Printf("Error processing message: %v", err)
 		} else if message != "" {
-			c.terminal.PrintMessage(message)
+			c.terminal.PrintMessage(message, true)
 		}
 	}
 }
@@ -217,7 +221,6 @@ func (c *Client) signalDone() {
 // Close signals all goroutines to exit and cleans up resources.
 func (c *Client) Close() {
 	c.terminal.Close()
-  fmt.Println("Exiting app...")
 	c.signalDone()
 	c.cleanupConnection()
 }
@@ -235,18 +238,18 @@ func (c *Client) handleKeySetup() error {
 		switch choice {
 		case "generate":
 			if err := c.generateKeys(); err != nil {
-				c.terminal.PrintMessage("Error generating keys: " + err.Error())
+				c.terminal.PrintMessage("Error generating keys: " + err.Error(), true)
 				continue // Re-prompt the user
 			}
 			return nil // Successful key generation
 		case "use":
 			if err := c.loadKeys(); err != nil {
-				c.terminal.PrintMessage("Error loading keys: " + err.Error())
+				c.terminal.PrintMessage("Error loading keys: " + err.Error(), true)
 				continue // Re-prompt the user
 			}
 			return nil // Successful key loading
 		default:
-			c.terminal.PrintMessage("Invalid choice. Please enter 'generate' or 'use'.")
+			c.terminal.PrintMessage("Invalid choice. Please enter 'generate' or 'use'.", true)
 			// Loop continues to re-prompt the user
 		}
 	}
@@ -258,7 +261,7 @@ func (c *Client) generateKeys() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate keys: %w", err)
 	}
-	c.terminal.PrintMessage("Keys generated and saved to 'private.pem' and 'public.pem'")
+	c.terminal.PrintMessage("Keys generated and saved to 'private.pem' and 'public.pem'", true)
 	return c.loadKeysFromFiles("private.pem", "public.pem")
 }
 
@@ -437,10 +440,10 @@ func (c *Client) handleServerMessage(message string) (handledMessage string) {
 	// Check for shutdown message
 	handledMessage = ""
 	if message == "Server is shutting down. Goodbye!" {
-		c.terminal.PrintMessage("Server has disconnected.")
+		c.terminal.PrintMessage("Server has disconnected.", false)
 		c.signalDone()
 	} else if message == "kicked" {
-		c.terminal.PrintMessageWithoutRestoringPrompt("You have been kicked from the server.(Press Enter to exit)")
+		c.terminal.PrintMessage("You have been kicked from the server.(Press Enter to exit)", false)
 		c.signalDone()
 	} else if message == "heartbeat ack" {
 		log.Printf("Received heartbeat from server\r\n")
@@ -464,28 +467,9 @@ func (c *Client) cleanupConnection() {
 // handleInterrupt listens for OS interrupt signals and triggers immediate shutdown.
 func (c *Client) handleInterrupt(sigChan <-chan os.Signal) {
 	<-sigChan
-	c.Close()
   fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
+  c.Close()
 	os.Exit(0)
-}
-
-// askYesNo prompts the user with a question and expects a yes/no response.
-func askYesNo(prompt string, terminal *gochatterminal.Terminal) bool {
-	for {
-		response, err := terminal.ReadLineWithPrompt(prompt)
-		if err != nil {
-			terminal.PrintMessage("Error reading input. Please try again.")
-			continue
-		}
-		response = strings.TrimSpace(strings.ToLower(response))
-		if response == "yes" || response == "y" {
-			return true
-		}
-		if response == "no" || response == "n" {
-			return false
-		}
-		terminal.PrintMessage("Please answer 'yes' or 'no'.")
-	}
 }
 
 func main() {
@@ -519,6 +503,7 @@ func main() {
 	if err := client.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	} else {
+    client.terminal.PrintMessage("Exiting app", false)
 		client.Close()
 	}
 
