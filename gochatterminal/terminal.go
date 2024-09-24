@@ -275,7 +275,6 @@ func (t *Terminal) PrintMessage(message string, restorePrompt bool) {
 }
 
 // askYesNo prompts the user with a question and expects a yes/no response.
-// TODO: Inlude this function in terminal package
 func (t *Terminal) AskYesNo(prompt string) bool {
 	for {
 		response, err := t.ReadLineWithPrompt(prompt)

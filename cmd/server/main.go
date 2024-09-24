@@ -89,7 +89,11 @@ func (s *Server) Run() error {
 			continue
 		}
 		s.listener = onion
-
+    
+    if err := s.terminal.SetRawMode(); err != nil {
+      s.terminal.PrintMessage("Could not set terminal raw mode " + err.Error(), false)
+      return err
+    }
 		s.terminal.PrintMessage("Server started. Connect with: " + onion.ID + ".onion:9999", true)
 
 		// Create a new context for this server session
@@ -201,6 +205,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 				}
 			} else {
 				s.broadcastMessage(message, client)
+        s.terminal.PrintMessage(message, true)
 			}
 		}
 	}

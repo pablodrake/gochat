@@ -1,4 +1,5 @@
 // main.go
+// TODO: Fix repeated lines printing
 package main
 
 import (
