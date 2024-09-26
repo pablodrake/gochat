@@ -39,6 +39,7 @@ type Server struct {
 	sharedKey         []byte
 	listener          net.Listener
 	terminal          *gochatterminal.Terminal
+	restorePrompt     bool
 
 	done chan struct{}
 	once sync.Once
@@ -57,6 +58,7 @@ func NewServer(heartbeatInterval time.Duration, terminal *gochatterminal.Termina
 		sharedKey:         serverKey,
 		terminal:          terminal,
 		done:              make(chan struct{}),
+		restorePrompt:     true,
 	}
 }
 
@@ -70,7 +72,7 @@ func (s *Server) Run() error {
 		// Start Tor and create onion service
 		t, err := tor.Start(context.TODO(), nil)
 		if err != nil {
-			s.terminal.PrintMessage("Failed to start Tor: " + err.Error(), true)
+			s.terminal.PrintMessage("Failed to start Tor: "+err.Error(), s.restorePrompt)
 			retry := s.terminal.AskYesNo("Do you want to try starting Tor again? [yes/no]: ")
 			if !retry {
 				return nil // Normal termination
@@ -81,7 +83,7 @@ func (s *Server) Run() error {
 
 		onion, err := t.Listen(context.Background(), &tor.ListenConf{RemotePorts: []int{9999}, Version3: true})
 		if err != nil {
-			s.terminal.PrintMessage("Failed to create onion service: " + err.Error(),true)
+			s.terminal.PrintMessage("Failed to create onion service: "+err.Error(), true)
 			retry := s.terminal.AskYesNo("Do you want to try creating the onion service again? [yes/no]: ")
 			if !retry {
 				return nil // Normal termination
@@ -89,12 +91,12 @@ func (s *Server) Run() error {
 			continue
 		}
 		s.listener = onion
-    
-    if err := s.terminal.SetRawMode(); err != nil {
-      s.terminal.PrintMessage("Could not set terminal raw mode " + err.Error(), false)
-      return err
-    }
-		s.terminal.PrintMessage("Server started. Connect with: " + onion.ID + ".onion:9999", true)
+
+		if err := s.terminal.SetRawMode(); err != nil {
+			s.terminal.PrintMessage("Could not set terminal raw mode "+err.Error(), false)
+			return err
+		}
+		s.terminal.PrintMessage("Server started. Connect with: "+onion.ID+".onion:9999", s.restorePrompt)
 
 		// Create a new context for this server session
 		ctx, cancel := context.WithCancel(context.Background())
@@ -143,7 +145,7 @@ func (s *Server) acceptConnections(ctx context.Context) {
 				// Server is shutting down
 				return
 			default:
-				s.terminal.PrintMessage("Listener error: " + err.Error(), true)
+				s.terminal.PrintMessage("Listener error: "+err.Error(), s.restorePrompt)
 				return
 			}
 		}
@@ -162,7 +164,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	publicKey, err := s.readPublicKey(reader)
 	if err != nil {
-		s.terminal.PrintMessage("Failed to read public key: " + err.Error(), true)
+		s.terminal.PrintMessage("Failed to read public key: "+err.Error(), s.restorePrompt)
 		return
 	}
 
@@ -170,7 +172,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	err = s.sendEncryptedSharedKey(conn, publicKey)
 	if err != nil {
-    s.terminal.PrintMessage("Failed to send encrypted shared key to " + publicKeyID + ": " + err.Error(), true)
+		s.terminal.PrintMessage("Failed to send encrypted shared key to "+publicKeyID+": "+err.Error(), s.restorePrompt)
 		return
 	}
 
@@ -191,7 +193,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 					continue // Read timeout, continue to next iteration
 				}
 				if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-          s.terminal.PrintMessage("Error reading from " + publicKeyID + ": " + err.Error(), true)
+					s.terminal.PrintMessage("Error reading from "+publicKeyID+": "+err.Error(), s.restorePrompt)
 				}
 				return
 			}
@@ -200,12 +202,12 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			} else if message == "heartbeat" {
 				err = s.sendAESEncryptedMessage(conn, []byte("heartbeat ack"))
 				if err != nil {
-					s.terminal.PrintMessage("Failed to send heartbeat ack to " + publicKeyID + ": " + err.Error(), true)
+					s.terminal.PrintMessage("Failed to send heartbeat ack to "+publicKeyID+": "+err.Error(), s.restorePrompt)
 					return
 				}
 			} else {
 				s.broadcastMessage(message, client)
-        s.terminal.PrintMessage(message, true)
+				s.terminal.PrintMessage(message, s.restorePrompt)
 			}
 		}
 	}
@@ -224,7 +226,7 @@ func (s *Server) handleInput(ctx context.Context) {
 					// Terminal closed
 					return
 				}
-				s.terminal.PrintMessage("Error reading input: " + err.Error(), true)
+				s.terminal.PrintMessage("Error reading input: "+err.Error(), s.restorePrompt)
 				continue
 			}
 
@@ -245,38 +247,38 @@ func (s *Server) handleInput(ctx context.Context) {
 					return
 				case "/kick":
 					if len(args) < 1 {
-						s.terminal.PrintMessage("Usage: /kick <client_id>", true)
+						s.terminal.PrintMessage("Usage: /kick <client_id>", s.restorePrompt)
 						continue
 					}
 					clientID := args[0]
-          client := s.getClientbyId(clientID)
-          if client != nil {
-            s.removeClient(client)
-          } else {
-            s.terminal.PrintMessage("Client not found", true)
-          }
+					client := s.getClientbyId(clientID)
+					if client != nil {
+						s.removeClient(client)
+					} else {
+						s.terminal.PrintMessage("Client not found", s.restorePrompt)
+					}
 				case "/broadcast":
 					if len(args) < 1 {
-						s.terminal.PrintMessage("Usage: /broadcast <message>", true)
+						s.terminal.PrintMessage("Usage: /broadcast <message>", s.restorePrompt)
 						continue
 					}
 					message := strings.Join(args, " ")
-					s.broadcastMessage("Server: " + message, nil)
-        case "/msg":
-          if len(args) < 2 {
-            s.terminal.PrintMessage("Usage : /msg <client_id> <message>", true)
-            continue
-          }
-          message := strings.Join(args[1:], " ")
-          clientID := args[0]
-          client := s.getClientbyId(clientID)
-          if client != nil {
-            s.sendServerMessage("Server: " + message, client)
-          } else {
-            s.terminal.PrintMessage("Client not found", true)
-          }
+					s.broadcastMessage("Server: "+message, nil)
+				case "/msg":
+					if len(args) < 2 {
+						s.terminal.PrintMessage("Usage : /msg <client_id> <message>", s.restorePrompt)
+						continue
+					}
+					message := strings.Join(args[1:], " ")
+					clientID := args[0]
+					client := s.getClientbyId(clientID)
+					if client != nil {
+						s.sendServerMessage("Server: "+message, client)
+					} else {
+						s.terminal.PrintMessage("Client not found", s.restorePrompt)
+					}
 				default:
-					s.terminal.PrintMessage("Unknown command: " + command, true)
+					s.terminal.PrintMessage("Unknown command: "+command, s.restorePrompt)
 				}
 			} else {
 				continue
@@ -287,6 +289,7 @@ func (s *Server) handleInput(ctx context.Context) {
 
 // shutdown initiates the server shutdown process.
 func (s *Server) Close() {
+	s.restorePrompt = false
 	s.terminal.Close()
 	s.signalDone()
 	s.cleanupServer()
@@ -367,7 +370,7 @@ func (s *Server) broadcastMessage(message string, sender *Client) {
 		if client != sender {
 			err := s.sendAESEncryptedMessage(client.conn, []byte(message))
 			if err != nil {
-        s.terminal.PrintMessage("Error sending message to " + client.publicKeyID + " : " + err.Error(), true)
+				s.terminal.PrintMessage("Error sending message to "+client.publicKeyID+" : "+err.Error(), s.restorePrompt)
 			}
 		}
 	}
@@ -397,7 +400,7 @@ func (s *Server) addClient(client *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clients[client.publicKeyID] = client
-	s.terminal.PrintMessage("Client connected: " + client.publicKeyID, true)
+	s.terminal.PrintMessage("Client connected: "+client.publicKeyID, s.restorePrompt)
 }
 
 // Modified removeClient method
@@ -421,7 +424,7 @@ func (s *Server) removeClient(client *Client) {
 	client.conn.Close()
 	if _, exists := s.clients[client.publicKeyID]; exists {
 		delete(s.clients, client.publicKeyID)
-		s.terminal.PrintMessage("Client disconnected: " + client.publicKeyID, true)
+		s.terminal.PrintMessage("Client disconnected: "+client.publicKeyID, s.restorePrompt)
 	}
 }
 
@@ -459,18 +462,18 @@ func (s *Server) sendEncryptedSharedKey(conn net.Conn, publicKey *rsa.PublicKey)
 
 func (s *Server) handleInterrupt(sigChan <-chan os.Signal) {
 	<-sigChan
-  fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
+	fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
 	s.Close()
 	os.Exit(0)
 }
 
-func (s *Server) getClientbyId(clientID string) *Client{
-  client, exists := s.clients[clientID]
-  if !exists {
-    s.terminal.PrintMessage("Client not found: " + clientID, true)
-    return nil
-  }
-  return client
+func (s *Server) getClientbyId(clientID string) *Client {
+	client, exists := s.clients[clientID]
+	if !exists {
+		s.terminal.PrintMessage("Client not found: "+clientID, s.restorePrompt)
+		return nil
+	}
+	return client
 }
 
 func main() {
@@ -497,7 +500,7 @@ func main() {
 	if err := server.Run(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	} else {
-    server.terminal.PrintMessage("Exiting app", false)
+		server.terminal.PrintMessage("Exiting app", false)
 		server.Close()
 	}
 }

@@ -1,7 +1,7 @@
-// gochatterminal/terminal.go
 package gochatterminal
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -24,6 +24,7 @@ type Terminal struct {
 	currentLine   string
 	mu            sync.Mutex // Protects currentLine
 	oldState      *term.State
+	isRawMode     bool // Indicates if the terminal is in raw mode
 }
 
 // InputRequest represents a request for user input.
@@ -38,6 +39,7 @@ func NewTerminal(prompt string) (*Terminal, error) {
 		inputRequests: make(chan InputRequest),
 		prompt:        prompt,
 		historyIndex:  0,
+		isRawMode:     false, // Initialize as not in raw mode
 	}
 
 	go t.inputManager()
@@ -47,151 +49,184 @@ func NewTerminal(prompt string) (*Terminal, error) {
 func (t *Terminal) inputManager() {
 	for req := range t.inputRequests {
 		stdoutMutex.Lock()
-		fmt.Print("\r" + req.Prompt) // Move to the start of the line before printing the prompt
+		fmt.Print("\r" + req.Prompt)
 		stdoutMutex.Unlock()
 
-		var line []rune
-		t.mu.Lock()
-		t.currentLine = "" // Initialize currentLine
-		t.mu.Unlock()
+		var line string
 
-		// Initialize cursor position and history index
-		t.cursorPos = 0
-		historyIndex := len(t.history)
+		if t.isRawMode {
+			// Use the raw mode input handling
+			line = t.readLineRawMode(req.Prompt)
+		} else {
+			// Use normal mode input handling
+			line = t.readLineNormalMode(req.Prompt)
+		}
 
-		for {
-			// Read a single byte
-			var buf [1]byte
-			n, err := os.Stdin.Read(buf[:])
-			if err != nil || n == 0 {
-				t.PrintMessage("Error reading input.", true)
-				req.Response <- ""
-				break
-			}
-			r := rune(buf[0])
+		// Send the line back to the requester
+		req.Response <- line
+	}
+}
 
-			if r == '\r' || r == '\n' {
-				// Newline detected, process the line
-				inputLine := string(line)
-				t.history = append(t.history, inputLine)
-				req.Response <- inputLine
-				line = nil // Clear the line
-				t.mu.Lock()
-				t.currentLine = "" // Clear currentLine
-				t.mu.Unlock()
-				stdoutMutex.Lock()
-				fmt.Print("\r\n") // Move to the next line
-				stdoutMutex.Unlock()
-				break
-			} else if r == 127 || r == '\b' {
-				// Handle backspace
-				if t.cursorPos > 0 {
-					line = append(line[:t.cursorPos-1], line[t.cursorPos:]...)
-					t.cursorPos--
+func (t *Terminal) readLineNormalMode(prompt string) string {
+	reader := bufio.NewReader(os.Stdin)
 
-					t.mu.Lock()
-					t.currentLine = string(line)
-					t.mu.Unlock()
+	stdoutMutex.Lock()
+	fmt.Print("\r" + prompt)
+	stdoutMutex.Unlock()
 
-					// Re-render the line
-					t.renderLine(req.Prompt, line)
-				}
-			} else if r == 3 {
-				// Handle Ctrl+C
-				stdoutMutex.Lock()
-				fmt.Print("^C\r\n")
-				stdoutMutex.Unlock()
-				req.Response <- ""
-				break
-			} else if r == 4 {
-				// Handle Ctrl+D (EOF)
-				req.Response <- ""
-				break
-			} else if r == 0x1b { // ESC character
-				// Read the next two bytes to identify the escape sequence
-				var seq [2]byte
-				n, err := os.Stdin.Read(seq[:])
-				if err != nil || n < 2 {
-					t.PrintMessage("Error reading escape sequence.", true)
-					continue // Skip processing this escape sequence
-				}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.PrintMessage("Error reading input.", true)
+		return ""
+	}
 
-				if seq[0] == '[' {
-					switch seq[1] {
-					case 'A': // Up Arrow
-						if historyIndex > 0 {
-							historyIndex--
-							// Retrieve the previous command from history
-							historyLine := t.history[historyIndex]
-							// Update the current line with the history entry
-							line = []rune(historyLine)
-							t.mu.Lock()
-							t.currentLine = historyLine
-							t.mu.Unlock()
-							// Set cursor position to the end of the line
-							t.cursorPos = len(line)
-							// Re-render the line
-							t.renderLine(req.Prompt, line)
-						}
-					case 'B': // Down Arrow
-						if historyIndex < len(t.history)-1 {
-							historyIndex++
-							// Retrieve the next command from history
-							historyLine := t.history[historyIndex]
-							// Update the current line with the history entry
-							line = []rune(historyLine)
-							t.mu.Lock()
-							t.currentLine = historyLine
-							t.mu.Unlock()
-							// Set cursor position to the end of the line
-							t.cursorPos = len(line)
-							// Re-render the line
-							t.renderLine(req.Prompt, line)
-						} else if historyIndex == len(t.history)-1 {
-							historyIndex++
-							// Reset the current line
-							line = nil
-							t.mu.Lock()
-							t.currentLine = ""
-							t.mu.Unlock()
-							// Set cursor position to the beginning
-							t.cursorPos = 0
-							// Re-render the prompt
-							t.renderLine(req.Prompt, line)
-						}
-					case 'C': // Right Arrow
-						if t.cursorPos < len(line) {
-							t.cursorPos++
-							stdoutMutex.Lock()
-							fmt.Print("\x1b[1C") // Move cursor right
-							stdoutMutex.Unlock()
-						}
-					case 'D': // Left Arrow
-						if t.cursorPos > 0 {
-							t.cursorPos--
-							stdoutMutex.Lock()
-							fmt.Print("\x1b[1D") // Move cursor left
-							stdoutMutex.Unlock()
-						}
-					default:
-						// Handle other escape sequences if necessary
-					}
-				}
-			} else {
-				// Add the rune to the line at cursorPos
-				line = append(line[:t.cursorPos], append([]rune{r}, line[t.cursorPos:]...)...)
-				t.cursorPos++
+	line = strings.TrimRight(line, "\r\n")
+	t.history = append(t.history, line)
+
+	// Reset currentLine and cursorPos
+	t.mu.Lock()
+	t.currentLine = ""
+	t.cursorPos = 0
+	t.mu.Unlock()
+
+	return line
+}
+
+func (t *Terminal) readLineRawMode(prompt string) string {
+	var line []rune
+	t.mu.Lock()
+	t.currentLine = ""
+	t.mu.Unlock()
+	t.cursorPos = 0
+	historyIndex := len(t.history)
+
+	for {
+		// Read a single byte
+		var buf [1]byte
+		n, err := os.Stdin.Read(buf[:])
+		if err != nil || n == 0 {
+			t.PrintMessage("Error reading input.", true)
+			return ""
+		}
+		r := rune(buf[0])
+
+		if r == '\r' || r == '\n' {
+			// Newline detected, process the line
+			inputLine := string(line)
+			t.history = append(t.history, inputLine)
+			t.mu.Lock()
+			t.currentLine = ""
+			t.mu.Unlock()
+			stdoutMutex.Lock()
+			fmt.Print("\r\n") // Move to the next line
+			stdoutMutex.Unlock()
+			return inputLine
+		} else if r == 127 || r == '\b' {
+			// Handle backspace
+			if t.cursorPos > 0 {
+				line = append(line[:t.cursorPos-1], line[t.cursorPos:]...)
+				t.cursorPos--
 
 				t.mu.Lock()
 				t.currentLine = string(line)
 				t.mu.Unlock()
 
 				// Re-render the line
-				t.renderLine(req.Prompt, line)
-
-				// Reset history index since user is typing a new command
-				historyIndex = len(t.history)
+				t.renderLine(prompt, line)
 			}
+		} else if r == 3 {
+			// Handle Ctrl+C
+			stdoutMutex.Lock()
+			fmt.Print("^C\r\n")
+			stdoutMutex.Unlock()
+			return ""
+		} else if r == 4 {
+			// Handle Ctrl+D (EOF)
+			return ""
+		} else if r == 0x1b { // ESC character
+			// Read the next two bytes to identify the escape sequence
+			var seq [2]byte
+			n, err := os.Stdin.Read(seq[:])
+			if err != nil || n < 2 {
+				t.PrintMessage("Error reading escape sequence.", true)
+				continue // Skip processing this escape sequence
+			}
+
+			if seq[0] == '[' {
+				switch seq[1] {
+				case 'A': // Up Arrow
+					if historyIndex > 0 {
+						historyIndex--
+						// Retrieve the previous command from history
+						historyLine := t.history[historyIndex]
+						// Update the current line with the history entry
+						line = []rune(historyLine)
+						t.mu.Lock()
+						t.currentLine = historyLine
+						t.mu.Unlock()
+						// Set cursor position to the end of the line
+						t.cursorPos = len(line)
+						// Re-render the line
+						t.renderLine(prompt, line)
+					}
+				case 'B': // Down Arrow
+					if historyIndex < len(t.history)-1 {
+						historyIndex++
+						// Retrieve the next command from history
+						historyLine := t.history[historyIndex]
+						// Update the current line with the history entry
+						line = []rune(historyLine)
+						t.mu.Lock()
+						t.currentLine = historyLine
+						t.mu.Unlock()
+						// Set cursor position to the end of the line
+						t.cursorPos = len(line)
+						// Re-render the line
+						t.renderLine(prompt, line)
+					} else if historyIndex == len(t.history)-1 {
+						historyIndex++
+						// Reset the current line
+						line = nil
+						t.mu.Lock()
+						t.currentLine = ""
+						t.mu.Unlock()
+						// Set cursor position to the beginning
+						t.cursorPos = 0
+						// Re-render the prompt
+						t.renderLine(prompt, line)
+					}
+				case 'C': // Right Arrow
+					if t.cursorPos < len(line) {
+						t.cursorPos++
+						stdoutMutex.Lock()
+						fmt.Print("\x1b[1C") // Move cursor right
+						stdoutMutex.Unlock()
+					}
+				case 'D': // Left Arrow
+					if t.cursorPos > 0 {
+						t.cursorPos--
+						stdoutMutex.Lock()
+						fmt.Print("\x1b[1D") // Move cursor left
+						stdoutMutex.Unlock()
+					}
+				default:
+					// Handle other escape sequences if necessary
+				}
+			}
+		} else {
+			// Add the rune to the line at cursorPos
+			line = append(line[:t.cursorPos], append([]rune{r}, line[t.cursorPos:]...)...)
+			t.cursorPos++
+
+			t.mu.Lock()
+			t.currentLine = string(line)
+			t.mu.Unlock()
+
+			// Re-render the line
+			t.renderLine(prompt, line)
+
+			// Reset history index since user is typing a new command
+			historyIndex = len(t.history)
 		}
 	}
 }
@@ -274,7 +309,7 @@ func (t *Terminal) PrintMessage(message string, restorePrompt bool) {
 	}
 }
 
-// askYesNo prompts the user with a question and expects a yes/no response.
+// AskYesNo prompts the user with a question and expects a yes/no response.
 func (t *Terminal) AskYesNo(prompt string) bool {
 	for {
 		response, err := t.ReadLineWithPrompt(prompt)
@@ -299,7 +334,7 @@ func (t *Terminal) SetRawMode() error {
 	// Save the old terminal state
 	oldState, err := term.GetState(fd)
 	if err != nil {
-		return fmt.Errorf("failed to get terminal state: +%w", err)
+		return fmt.Errorf("failed to get terminal state: %w", err)
 	}
 
 	// Put the terminal into raw mode
@@ -322,12 +357,14 @@ func (t *Terminal) SetRawMode() error {
 	}
 
 	t.oldState = oldState
+	t.isRawMode = true
 	return nil
 }
 
 func (t *Terminal) RestoreState() error {
 	if t.oldState != nil {
 		term.Restore(int(os.Stdin.Fd()), t.oldState)
+		t.isRawMode = false
 	}
 	return nil
 }

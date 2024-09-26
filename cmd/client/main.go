@@ -61,7 +61,7 @@ func (c *Client) Run() error {
 
 		// Establish connection
 		if err := c.establishConnection(); err != nil {
-			c.terminal.PrintMessage("Failed to establish connection: " + err.Error(), true)
+			c.terminal.PrintMessage("Failed to establish connection: "+err.Error(), true)
 			retry := c.terminal.AskYesNo("Do you want to connect to another server? [yes/no]: ")
 			if !retry {
 				return nil // Normal termination
@@ -69,10 +69,10 @@ func (c *Client) Run() error {
 			continue
 		}
 
-    if err := c.terminal.SetRawMode(); err != nil {
-      c.terminal.PrintMessage("Failed to set terminal to raw mode " + err.Error(), false)
-      return err
-    }
+		if err := c.terminal.SetRawMode(); err != nil {
+			c.terminal.PrintMessage("Failed to set terminal to raw mode "+err.Error(), false)
+			return err
+		}
 		c.terminal.PrintMessage("Successfully connected to the chat server!", true)
 
 		// Create a new context for this connection session
@@ -239,13 +239,13 @@ func (c *Client) handleKeySetup() error {
 		switch choice {
 		case "generate":
 			if err := c.generateKeys(); err != nil {
-				c.terminal.PrintMessage("Error generating keys: " + err.Error(), true)
+				c.terminal.PrintMessage("Error generating keys: "+err.Error(), true)
 				continue // Re-prompt the user
 			}
 			return nil // Successful key generation
 		case "use":
 			if err := c.loadKeys(); err != nil {
-				c.terminal.PrintMessage("Error loading keys: " + err.Error(), true)
+				c.terminal.PrintMessage("Error loading keys: "+err.Error(), true)
 				continue // Re-prompt the user
 			}
 			return nil // Successful key loading
@@ -468,8 +468,8 @@ func (c *Client) cleanupConnection() {
 // handleInterrupt listens for OS interrupt signals and triggers immediate shutdown.
 func (c *Client) handleInterrupt(sigChan <-chan os.Signal) {
 	<-sigChan
-  fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
-  c.Close()
+	fmt.Println("\r\nReceived interrupt signal. Exiting...\r")
+	c.Close()
 	os.Exit(0)
 }
 
@@ -504,7 +504,7 @@ func main() {
 	if err := client.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	} else {
-    client.terminal.PrintMessage("Exiting app", false)
+		client.terminal.PrintMessage("Exiting app", false)
 		client.Close()
 	}
 
