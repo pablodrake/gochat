@@ -37,7 +37,7 @@ To run GoChat, follow these simple steps:
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/gochat.git
+   git clone https://github.com/pablodrake/gochat.git
    cd gochat
    ```
 
